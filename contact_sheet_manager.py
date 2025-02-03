@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import messagebox  # Add this import
 from PIL import Image, ImageTk
 import os
 import logging
@@ -99,6 +100,9 @@ class ImageViewer:
         self.space_pressed = False
         self.moved_files = set()  # Keep track of already moved files
 
+        # Add reference to parent selector
+        self.selector = None  # Will be set by FolderSelector
+
         # Setup window
         self.root.title("Contact Sheet Manager")
         self.root.state('zoomed')
@@ -138,7 +142,7 @@ class ImageViewer:
         self.root.bind('<MouseWheel>', self.on_mouse_wheel)
         self.root.bind('<Button-4>', self.on_mouse_wheel)
         self.root.bind('<Button-5>', self.on_mouse_wheel)
-        self.root.bind('<Escape>', lambda e: self.root.quit())
+        self.root.bind('<Escape>', self.confirm_exit)
         
         # Add keyboard bindings
         self.root.bind('<KeyPress-space>', self.space_pressed_handler)
@@ -156,6 +160,15 @@ class ImageViewer:
         else:
             logging.error("No customScreens_ folder found, cannot proceed")
             self.loading_label.configure(text="Error: customScreens_ folder not found")
+
+    def confirm_exit(self, event=None):
+        """Show confirmation dialog before returning to folder selection"""
+        if tk.messagebox.askyesno("Confirm", "Return to folder selection?"):
+            # Show selector window
+            if self.selector:
+                self.selector.root.deiconify()
+            # Destroy viewer window
+            self.root.destroy()
 
     def load_all_images(self, video_path, screens_path):
         """Load and process all matching images"""
@@ -411,28 +424,91 @@ def cleanup_empty_dirs(base_path):
         logging.info(f"Removed {removed} empty directories")
     return removed
 
+class FolderSelector:
+    """Initial UI for folder path selection"""
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Select Folder")
+        self.root.geometry("600x150")
+        
+        # Configure grid
+        self.root.grid_columnconfigure(0, weight=1)
+        
+        # Create UI elements
+        self.path_var = tk.StringVar()
+        self.path_var.set(r"X:\downloads\misc\notready_\jd2vpn\simpcity")
+        
+        # Path entry
+        path_frame = tk.Frame(root)
+        path_frame.grid(row=0, column=0, padx=10, pady=10, sticky='ew')
+        path_frame.grid_columnconfigure(0, weight=1)
+        
+        path_entry = tk.Entry(path_frame, textvariable=self.path_var)
+        path_entry.grid(row=0, column=0, sticky='ew')
+        
+        # Start button
+        start_btn = tk.Button(root, text="Start Viewer", command=self.start_viewer)
+        start_btn.grid(row=1, column=0, pady=10)
+        
+        # Status label
+        self.status_label = tk.Label(root, text="", fg="red")
+        self.status_label.grid(row=2, column=0, pady=5)
+        
+        # Bind enter key
+        self.root.bind('<Return>', lambda e: self.start_viewer())
+        
+    def start_viewer(self):
+        """Validate path and start the image viewer"""
+        folder_path = self.path_var.get().strip()
+        
+        if not os.path.exists(folder_path):
+            self.status_label.configure(text="Error: Folder not found")
+            return
+            
+        # Hide selector window
+        self.root.withdraw()
+        
+        try:
+            # Clean up empty directories
+            cleanup_empty_dirs(folder_path)
+            
+            # Create new window for viewer
+            viewer_window = tk.Toplevel()
+            
+            # Start viewer and give it reference to selector
+            app = ImageViewer(viewer_window, folder_path)
+            app.selector = self
+            
+            # Update protocol to use confirm_exit
+            viewer_window.protocol("WM_DELETE_WINDOW", app.confirm_exit)
+            
+            # Close selector when viewer closes without confirmation
+            viewer_window.bind('<Destroy>', self._on_viewer_closed)
+            
+        except Exception as e:
+            logging.error(f"Error starting viewer: {e}")
+            self.status_label.configure(text=f"Error: {str(e)}")
+            self.root.deiconify()  # Show selector again on error
+
+    def _on_viewer_closed(self, event):
+        """Handle viewer window closing"""
+        if not self.root.winfo_viewable():  # If selector is still hidden
+            self.root.quit()
+
 def main():
+    """
+    Main function to initialize and run the application
+    """
     try:
         logging.info("Starting application")
         root = tk.Tk()
-        folder_path = r"X:\downloads\misc\notready_\jd2vpn\simpcity\sexysarabee\sexysarabee\30-60s_"
-        
-        # Verify paths exist
-        if not os.path.exists(folder_path):
-            logging.error(f"Base folder path does not exist: {folder_path}")
-            raise FileNotFoundError(f"Folder not found: {folder_path}")
-        
-        # Clean up empty directories before starting
-        cleanup_empty_dirs(folder_path)
-            
-        logging.info(f"Using folder path: {folder_path}")
-        app = ImageViewer(root, folder_path)
+        app = FolderSelector(root)
         root.mainloop()
-        return 0, app
+        return 0
     except Exception as e:
         logging.error("Application error", exc_info=True)
-        return 1, None
+        return 1
 
 if __name__ == "__main__":
-    exit_code, viewer = main()
+    exit_code = main()
     exit(exit_code)
