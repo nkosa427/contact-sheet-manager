@@ -108,16 +108,22 @@ class ImageViewer:
         self.root.state('zoomed')
         self.root.minsize(800, 600)
         
-        # Configure grid
-        self.root.grid_rowconfigure(0, weight=1)
+        # Configure grid with proper padding
+        self.root.grid_rowconfigure(0, weight=1, pad=10)  # Add top padding
         self.root.grid_rowconfigure(1, weight=0)  # For file info
-        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1, pad=10)  # Add side padding
         
-        # Create UI
-        self.label = tk.Label(root, bg='black')
+        # Create main content frame with padding
+        content_frame = tk.Frame(root, bg='black')
+        content_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
+        content_frame.grid_rowconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(0, weight=1)
+        
+        # Create UI in content frame instead of root
+        self.label = tk.Label(content_frame, bg='black')
         self.label.grid(row=0, column=0, sticky='nsew')
         
-        # Add file info display
+        # Add file info display at bottom of root
         self.info_label = tk.Label(
             root,
             text="",
@@ -127,10 +133,11 @@ class ImageViewer:
             anchor='w',
             padx=10
         )
-        self.info_label.grid(row=1, column=0, sticky='ew')
+        self.info_label.grid(row=1, column=0, sticky='ew', padx=10, pady=(0, 10))
         
+        # Loading label in content frame
         self.loading_label = tk.Label(
-            root, 
+            content_frame, 
             text="Loading images...", 
             font=('Arial', 12),
             bg='black',
@@ -206,8 +213,9 @@ class ImageViewer:
     def prepare_image(self, img):
         """Prepare single image at window size"""
         try:
-            width = self.root.winfo_width() - 20
-            height = self.root.winfo_height() - 20
+            # Account for padding in both directions
+            width = self.root.winfo_width() - 40  # 20px padding on each side
+            height = self.root.winfo_height() - 60  # Extra space for info label
             logging.debug(f"Window dimensions: {width}x{height}")
             
             if width <= 0 or height <= 0:
@@ -365,6 +373,8 @@ class ImageViewer:
                 
                 # Update display
                 if self.photos:
+                    # Adjust current index to the next file after the moved files
+                    self.current_index = start_idx
                     self.show_image(min(self.current_index, len(self.photos) - 1))
                 else:
                     self.label.configure(image='')
