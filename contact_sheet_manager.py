@@ -84,6 +84,16 @@ def get_matching_files(video_path, screens_path):
     
     return sorted(matched_files)
 
+def ensure_keep_folder(base_path):
+    """Create 'keep' folder and its customScreens_ subfolder if they don't exist"""
+    keep_folder = os.path.join(base_path, 'keep')
+    
+    if not os.path.exists(keep_folder):
+        logging.info(f"Creating keep folder at: {keep_folder}")
+        os.makedirs(keep_folder)
+    
+    return keep_folder
+
 class ImageViewer:
     def __init__(self, root, folder_path):
         logging.info("Initializing ImageViewer")
@@ -92,6 +102,11 @@ class ImageViewer:
         self.photos = []      # Store all processed images
         self.file_pairs = []  # Store (video_path, image_path) pairs
         
+        # Add keep folder paths
+        self.keep_folder = ensure_keep_folder(folder_path)
+
+        self.base_path = folder_path  # Store base path for folder creation
+
         # Setup window
         self.root.title("Contact Sheet Manager")
         self.root.state('zoomed')
@@ -133,6 +148,11 @@ class ImageViewer:
         self.root.bind('<Button-5>', self.on_mouse_wheel)
         self.root.bind('<Escape>', lambda e: self.root.quit())
         
+        # Add keyboard bindings
+        self.root.bind('a', lambda e: self.move_to_destination('A'))
+        self.root.bind('f', lambda e: self.move_to_destination('F'))
+        self.root.bind('r', lambda e: self.move_to_destination('R'))
+
         # Find customScreens_ folder and load images
         screens_folder = find_custom_screens_folder(folder_path)
         if screens_folder:
@@ -213,6 +233,12 @@ class ImageViewer:
     def show_image(self, index):
         """Display image and file info at given index"""
         logging.debug(f"Attempting to show image at index: {index}")
+        if not self.photos:  # Check if any photos left
+            logging.info("No photos left to display")
+            self.label.configure(image='')
+            self.info_label.configure(text="No more images to process")
+            return
+            
         if 0 <= index < len(self.photos):
             self.current_index = index
             logging.debug("Configuring label with new image")
@@ -232,10 +258,89 @@ class ImageViewer:
 
     def on_mouse_wheel(self, event):
         """Handle mouse wheel navigation"""
+        if not self.photos:  # Prevent navigation when no images left
+            return
+            
         if event.num == 5 or event.delta < 0:      # Scroll down
             self.show_image(min(self.current_index + 1, len(self.photos) - 1))
         elif event.num == 4 or event.delta > 0:    # Scroll up
             self.show_image(max(self.current_index - 1, 0))
+
+    def verify_file_pair(self, video_path, image_path):
+        """Verify that image filename matches video filename"""
+        video_name = os.path.basename(video_path)
+        image_name = os.path.basename(image_path)
+        
+        # Image name should be video name + image extension
+        return image_name.startswith(video_name)
+
+    def create_destination_folders(self, dest_key):
+        """Create destination folders inside keep folder only when needed"""
+        main_folder = os.path.join(self.keep_folder, dest_key)
+        screens_folder = os.path.join(main_folder, 'customScreens_')
+        
+        if not os.path.exists(main_folder):
+            logging.info(f"Creating {dest_key} folder at: {main_folder}")
+            os.makedirs(main_folder)
+        
+        if not os.path.exists(screens_folder):
+            logging.info(f"Creating customScreens_ folder at: {screens_folder}")
+            os.makedirs(screens_folder)
+            
+        return main_folder, screens_folder
+
+    def move_to_destination(self, dest_key):
+        """Move current video and image to specified destination folder"""
+        if 0 <= self.current_index < len(self.file_pairs):
+            video_path, image_path = self.file_pairs[self.current_index]
+            
+            try:
+                # Verify filename match
+                if not self.verify_file_pair(video_path, image_path):
+                    logging.error(f"Filename mismatch: {video_path} -> {image_path}")
+                    return
+                
+                # Create destination folders only when needed
+                main_folder, screens_folder = self.create_destination_folders(dest_key)
+                
+                # Move files to appropriate folders
+                video_name = os.path.basename(video_path)
+                image_name = os.path.basename(image_path)
+                
+                video_dest = os.path.join(main_folder, video_name)
+                image_dest = os.path.join(screens_folder, image_name)
+                
+                logging.info(f"Moving files to {dest_key}:\nVideo -> {video_dest}\nImage -> {image_dest}")
+                
+                os.rename(video_path, video_dest)
+                os.rename(image_path, image_dest)
+                
+                # Remove files from lists to prevent access after move
+                self.photos.pop(self.current_index)
+                self.file_pairs.pop(self.current_index)
+                
+                # Update UI to show success
+                self.info_label.configure(
+                    text=f"✓ Moved to {dest_key}:\n{video_name}\n{image_name}"
+                )
+                
+                # If we removed the last item, go to previous
+                if self.current_index >= len(self.photos):
+                    self.current_index = max(0, len(self.photos) - 1)
+                
+                # Show next image if any left
+                if self.photos:
+                    self.show_image(self.current_index)
+                else:
+                    # No images left
+                    self.label.configure(image='')
+                    self.info_label.configure(text="No more images to process")
+                
+            except Exception as e:
+                logging.error(f"Error moving files: {e}")
+                self.info_label.configure(
+                    text=f"Error moving files: {str(e)}"
+                )
 
 def main():
     try:
