@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import os
 import logging
 import subprocess  # Add this import
+from tkinterdnd2 import DND_FILES, TkinterDnD  # Add this import
 
 # Setup logging
 logging.basicConfig(
@@ -373,8 +374,6 @@ class ImageViewer:
                 
                 # Update display
                 if self.photos:
-                    # Adjust current index to the next file after the moved files
-                    self.current_index = start_idx
                     self.show_image(min(self.current_index, len(self.photos) - 1))
                 else:
                     self.label.configure(image='')
@@ -446,7 +445,7 @@ class FolderSelector:
         
         # Create UI elements
         self.path_var = tk.StringVar()
-        self.path_var.set(r"X:\downloads\misc\notready_\jd2vpn\simpcity")
+        self.path_var.set(r"")
         
         # Path entry
         path_frame = tk.Frame(root)
@@ -455,6 +454,10 @@ class FolderSelector:
         
         path_entry = tk.Entry(path_frame, textvariable=self.path_var)
         path_entry.grid(row=0, column=0, sticky='ew')
+        
+        # Configure drag and drop
+        path_entry.drop_target_register(DND_FILES)
+        path_entry.dnd_bind('<<Drop>>', self.handle_drop)
         
         # Start button
         start_btn = tk.Button(root, text="Start Viewer", command=self.start_viewer)
@@ -467,6 +470,20 @@ class FolderSelector:
         # Bind enter key
         self.root.bind('<Return>', lambda e: self.start_viewer())
         
+    def handle_drop(self, event):
+        """Handle folder drop from Windows Explorer"""
+        folder_path = event.data
+        # Remove curly braces and quotes if present (Windows drag&drop artifact)
+        folder_path = folder_path.strip('{}')
+        if folder_path.startswith('"') and folder_path.endswith('"'):
+            folder_path = folder_path[1:-1]
+        
+        # Check if it's a valid directory
+        if os.path.isdir(folder_path):
+            self.path_var.set(folder_path)
+        else:
+            self.status_label.configure(text="Please drop a folder, not a file")
+
     def start_viewer(self):
         """Validate path and start the image viewer"""
         folder_path = self.path_var.get().strip()
@@ -511,7 +528,7 @@ def main():
     """
     try:
         logging.info("Starting application")
-        root = tk.Tk()
+        root = TkinterDnD.Tk()  # Use TkinterDnD.Tk instead of tk.Tk
         app = FolderSelector(root)
         root.mainloop()
         return 0
