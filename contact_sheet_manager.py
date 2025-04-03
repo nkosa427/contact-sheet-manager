@@ -3,8 +3,10 @@ from tkinter import messagebox  # Add this import
 from PIL import Image, ImageTk
 import os
 import logging
-import subprocess  # Add this import
-from tkinterdnd2 import DND_FILES, TkinterDnD  # Add this import
+import subprocess
+import threading
+import queue
+from tkinterdnd2 import DND_FILES, TkinterDnD
 
 # Setup logging
 logging.basicConfig(
@@ -92,7 +94,11 @@ class ImageViewer:
         logging.info("Initializing ImageViewer")
         self.root = root
         self.current_index = 0
-        self.photos = []      # Store all processed images
+        # self.photos = []      # Store all processed images - Replaced by loaded_images
+        self.loaded_images = {} # Store loaded PIL images {index: pil_image}
+        self.image_queue = queue.Queue() # Queue for background loading
+        self.loading_thread = None
+        self.target_dimensions = (800, 600) # Default/initial dimensions
         self.file_pairs = []  # Store (video_path, image_path) pairs
         self.base_path = folder_path  # Store base path for folder creation
         self.keep_folder = os.path.join(folder_path, 'keep')  # Just store path, don't create yet
@@ -123,7 +129,7 @@ class ImageViewer:
         # Create UI in content frame instead of root
         self.label = tk.Label(content_frame, bg='black')
         self.label.grid(row=0, column=0, sticky='nsew')
-        
+
         # Add file info display at bottom of root
         self.info_label = tk.Label(
             root,
@@ -144,9 +150,12 @@ class ImageViewer:
             bg='black',
             fg='white'
         )
+        # Keep loading_label, but manage visibility differently
         self.loading_label.grid(row=0, column=0, sticky='nsew')
-        
+        self.loading_label.grid_remove() # Hide initially
+
         # Bind events
+        self.root.bind('<Configure>', self.on_resize) # Handle window resize
         self.root.bind('<MouseWheel>', self.on_mouse_wheel)
         self.root.bind('<Button-4>', self.on_mouse_wheel)
         self.root.bind('<Button-5>', self.on_mouse_wheel)
@@ -168,6 +177,24 @@ class ImageViewer:
         else:
             logging.error("No customScreens_ folder found, cannot proceed")
             self.loading_label.configure(text="Error: customScreens_ folder not found")
+            self.loading_label.grid() # Show error
+
+    def on_resize(self, event):
+        """Handle window resize event."""
+        # Update target dimensions based on new window size
+        # Subtract padding/margins as needed
+        width = event.width - 40
+        height = event.height - 60 # Account for info label
+        if width > 0 and height > 0:
+            self.target_dimensions = (width, height)
+            logging.debug(f"Window resized, new target dimensions: {self.target_dimensions}")
+            # Re-display the current image to resize it
+            if self.file_pairs: # Only if images are loaded/loading
+                 # Clear the current PhotoImage cache for the index
+                if self.current_index in self.loaded_images and isinstance(self.loaded_images[self.current_index], ImageTk.PhotoImage):
+                    self.loaded_images[self.current_index] = self.loaded_images[self.current_index].pil_image # Revert to PIL image
+                self.show_image(self.current_index, force_update=True)
+
 
     def confirm_exit(self, event=None):
         """Show confirmation dialog before returning to folder selection"""
@@ -182,106 +209,201 @@ class ImageViewer:
         """Load and process all matching images"""
         self.file_pairs = get_matching_files(video_path, screens_path)
         total = len(self.file_pairs)
-        logging.info(f"Loading {total} images")
-        
-        for i, (video_path, image_path) in enumerate(self.file_pairs):
-            try:
-                progress_msg = f"Loading images... ({i+1}/{total})"
-                logging.debug(f"Processing image {i+1}/{total}: {image_path}")
-                self.loading_label.configure(text=progress_msg)
-                self.root.update_idletasks()
-                
-                img = Image.open(image_path)
-                logging.debug(f"Original image size: {img.size}")
-                photo = self.prepare_image(img)
-                if photo:
-                    self.photos.append(photo)
-                    logging.debug("Successfully processed and cached image")
-                else:
-                    logging.error(f"Failed to prepare image: {image_path}")
-                
-            except Exception as e:
-                logging.error(f"Error loading {image_path}: {e}", exc_info=True)
-        
-        logging.info(f"Finished loading {len(self.photos)} images")
-        self.loading_label.grid_remove()
-        if self.photos:
-            logging.info("Showing first image")
-            self.show_image(0)
-        else:
-            logging.error("No images were successfully loaded!")
+        logging.info(f"Found {total} matching file pairs.")
 
-    def prepare_image(self, img):
-        """Prepare single image at window size"""
+        if not self.file_pairs:
+            logging.error("No matching files found!")
+            self.loading_label.configure(text="Error: No matching video/image files found.")
+            self.loading_label.grid()
+            return
+
+        # Get initial dimensions for resizing
+        self.root.update_idletasks() # Ensure window dimensions are available
+        width = self.root.winfo_width() - 40
+        height = self.root.winfo_height() - 60
+        if width <= 0 or height <= 0:
+             width, height = 800, 600 # Fallback dimensions
+             logging.warning(f"Using fallback dimensions: {width}x{height}")
+        self.target_dimensions = (width, height)
+        logging.info(f"Initial target dimensions for loading: {self.target_dimensions}")
+
+        # Show loading indicator
+        self.loading_label.configure(text=f"Loading 0/{total} images...")
+        self.loading_label.grid()
+
+        # Start background loading thread
+        self.loading_thread = threading.Thread(
+            target=self._background_load_images,
+            args=(list(self.file_pairs), self.image_queue, self.target_dimensions), # Pass a copy
+            daemon=True
+        )
+        self.loading_thread.start()
+
+        # Start processing the queue
+        self.root.after(100, self._process_queue) # Check queue every 100ms
+
+    def _background_load_images(self, file_pairs_copy, q, target_dims):
+        """Load images in a background thread."""
+        logging.info(f"[Thread] Starting background image loading for {len(file_pairs_copy)} images.")
+        for i, (video_path, image_path) in enumerate(file_pairs_copy):
+            try:
+                logging.debug(f"[Thread] Loading image {i}: {image_path}")
+                img = Image.open(image_path)
+                resized_img = self.prepare_image(img, target_dims)
+                if resized_img:
+                    q.put((i, resized_img)) # Put index and PIL image on queue
+                    logging.debug(f"[Thread] Queued image {i}")
+                else:
+                     logging.error(f"[Thread] Failed to prepare image {i}: {image_path}")
+
+            except Exception as e:
+                logging.error(f"[Thread] Error loading {image_path}: {e}", exc_info=True)
+        q.put(None) # Signal completion
+        logging.info("[Thread] Background image loading finished.")
+
+    def _process_queue(self):
+        """Process images from the background queue in the main thread."""
         try:
-            # Account for padding in both directions
-            width = self.root.winfo_width() - 40  # 20px padding on each side
-            height = self.root.winfo_height() - 60  # Extra space for info label
-            logging.debug(f"Window dimensions: {width}x{height}")
-            
-            if width <= 0 or height <= 0:
-                logging.error(f"Invalid window dimensions: {width}x{height}")
+            while not self.image_queue.empty():
+                item = self.image_queue.get_nowait()
+                if item is None:
+                    # Loading finished
+                    logging.info("Finished processing image queue.")
+                    self.loading_label.grid_remove()
+                    if not self.loaded_images:
+                         logging.error("No images were successfully loaded!")
+                         self.info_label.configure(text="Error: Failed to load any images.")
+                    elif 0 not in self.loaded_images:
+                         logging.warning("First image (index 0) not loaded yet, waiting...")
+                         # It might still be in the queue, check again soon
+                         self.root.after(50, self._process_queue)
+                         return # Don't stop checking yet
+                    else:
+                         # Ensure first image is shown if loading finished quickly
+                         if self.label.image is None:
+                              self.show_image(0)
+                    return # Stop checking
+
+                index, pil_image = item
+                logging.debug(f"Processing queued image index {index}")
+                self.loaded_images[index] = pil_image # Store PIL image
+
+                # Update loading label
+                total = len(self.file_pairs)
+                loaded_count = len(self.loaded_images)
+                self.loading_label.configure(text=f"Loading {loaded_count}/{total} images...")
+
+                # Show the first image as soon as it's ready
+                if index == 0 and self.label.image is None:
+                    logging.info("First image loaded, displaying.")
+                    self.show_image(0)
+
+        except queue.Empty:
+            pass # Queue is empty, check again later
+        except Exception as e:
+            logging.error(f"Error processing image queue: {e}", exc_info=True)
+
+        # Schedule next check if loading is not finished
+        if self.loading_thread and self.loading_thread.is_alive() or not self.image_queue.empty():
+             self.root.after(100, self._process_queue)
+
+
+    def prepare_image(self, img, target_dims):
+        """Resize PIL image to fit target dimensions."""
+        try:
+            target_width, target_height = target_dims
+            logging.debug(f"Preparing image with target dimensions: {target_width}x{target_height}")
+
+            if target_width <= 0 or target_height <= 0:
+                logging.error(f"Invalid target dimensions: {target_width}x{target_height}")
                 return None
-            
-            # Log original and calculated dimensions
-            img_ratio = img.width / img.height
-            window_ratio = width / height
-            logging.debug(f"Image ratio: {img_ratio:.2f}, Window ratio: {window_ratio:.2f}")
-            
-            if window_ratio > img_ratio:
-                new_height = height
-                new_width = int(new_height * img_ratio)
-            else:
-                new_width = width
-                new_height = int(new_width / img_ratio)
-                
-            logging.debug(f"Resizing to: {new_width}x{new_height}")
-            
-            photo = ImageTk.PhotoImage(
-                img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            )
-            logging.debug("Successfully created PhotoImage")
-            return photo
-            
+
+            img.thumbnail((target_width, target_height), Image.Resampling.LANCZOS)
+            logging.debug(f"Resized image to: {img.size}")
+            return img
+
         except Exception as e:
             logging.error(f"Error preparing image: {e}", exc_info=True)
             return None
 
-    def show_image(self, index):
-        """Display image and file info at given index"""
+    def show_image(self, index, force_update=False):
+        """Display image and file info at given index from loaded_images."""
         logging.debug(f"Attempting to show image at index: {index}")
-        if not self.photos:  # Check if any photos left
-            logging.info("No photos left to display")
+
+        # Check if file_pairs is populated
+        if not self.file_pairs:
+            logging.warning("show_image called before file_pairs are loaded.")
             self.label.configure(image='')
-            self.info_label.configure(text="No more images to process")
+            self.info_label.configure(text="Loading file list...")
             return
-            
-        if 0 <= index < len(self.photos):
-            self.current_index = index
-            logging.debug("Configuring label with new image")
-            self.label.configure(image=self.photos[index])
-            self.label.image = self.photos[index]
-            
+
+        if not (0 <= index < len(self.file_pairs)):
+            logging.error(f"Invalid image index: {index} for {len(self.file_pairs)} files")
+            return # Invalid index
+
+        self.current_index = index
+        video_path, image_path = self.file_pairs[index]
+
+        # Check if image is loaded
+        loaded_item = self.loaded_images.get(index)
+
+        if loaded_item is None:
+            logging.warning(f"Image {index} not loaded yet.")
+            # Optionally show a placeholder/loading text on the label
+            self.label.configure(image='') # Clear previous image
+            self.label.image = None
+            self.info_label.configure(text=f"Loading image {index+1}...\nVideo: {os.path.basename(video_path)}\nScreen: {os.path.basename(image_path)}")
+            return
+
+        try:
+            # If it's already a PhotoImage and we don't force update, use it
+            if isinstance(loaded_item, ImageTk.PhotoImage) and not force_update:
+                 photo = loaded_item
+                 logging.debug(f"Using cached PhotoImage for index {index}")
+            else:
+                 # It's a PIL image, or we need to force update (resize)
+                 pil_image = loaded_item if not isinstance(loaded_item, ImageTk.PhotoImage) else loaded_item.pil_image
+                 # Resize based on current target dimensions
+                 resized_pil_image = self.prepare_image(pil_image.copy(), self.target_dimensions) # Use copy
+                 if not resized_pil_image:
+                      raise ValueError("Failed to resize PIL image")
+
+                 photo = ImageTk.PhotoImage(resized_pil_image)
+                 photo.pil_image = resized_pil_image # Keep reference to PIL image if needed later
+                 self.loaded_images[index] = photo # Cache the PhotoImage
+                 logging.debug(f"Created and cached PhotoImage for index {index} with size {resized_pil_image.size}")
+
+            self.label.configure(image=photo)
+            self.label.image = photo # Keep reference
+
             # Update file info
-            video_path, image_path = self.file_pairs[index]
             video_name = os.path.basename(video_path)
             image_name = os.path.basename(image_path)
             logging.debug(f"Showing file info for: {video_name} -> {image_name}")
             self.info_label.configure(
                 text=f"Video: {video_name}\nScreen: {image_name}"
             )
-        else:
-            logging.error(f"Invalid image index: {index}")
+
+        except Exception as e:
+             logging.error(f"Error displaying image {index}: {e}", exc_info=True)
+             self.label.configure(image='')
+             self.label.image = None
+             self.info_label.configure(text=f"Error loading image {index+1}")
+
 
     def on_mouse_wheel(self, event):
         """Handle mouse wheel navigation"""
-        if not self.photos:  # Prevent navigation when no images left
+        if not self.file_pairs: # Check file_pairs instead of photos
             return
-            
+
         if event.num == 5 or event.delta < 0:      # Scroll down
-            self.show_image(min(self.current_index + 1, len(self.photos) - 1))
+            next_index = min(self.current_index + 1, len(self.file_pairs) - 1)
+            if next_index != self.current_index:
+                 self.show_image(next_index)
         elif event.num == 4 or event.delta > 0:    # Scroll up
-            self.show_image(max(self.current_index - 1, 0))
+            prev_index = max(self.current_index - 1, 0)
+            if prev_index != self.current_index:
+                 self.show_image(prev_index)
 
     def verify_file_pair(self, video_path, image_path):
         """Verify that image filename matches video filename"""
@@ -363,38 +485,95 @@ class ImageViewer:
                     self.moved_files.add(video_path)
                     moved_count += 1
                 
-                # Remove moved files from lists
-                self.cleanup_moved_files()
-                
+                # Remove moved files from lists and update index
+                new_index = self.cleanup_moved_files()
+
                 # Update UI with batch move results
                 status = f"✓ Moved {moved_count} files to {dest_key}"
                 if failed_count > 0:
                     status += f"\nFailed to move {failed_count} files"
                 self.info_label.configure(text=status)
-                
+
                 # Update display
-                if self.photos:
-                    self.show_image(min(self.current_index, len(self.photos) - 1))
+                if self.file_pairs: # Check file_pairs
+                    self.show_image(new_index) # Show image at the adjusted index
                 else:
                     self.label.configure(image='')
+                    self.label.image = None
                     self.info_label.configure(text="No more images to process")
-                
+
             except Exception as e:
-                logging.error(f"Error moving files: {e}")
+                logging.error(f"Error moving files: {e}", exc_info=True)
                 self.info_label.configure(text=f"Error moving files: {str(e)}")
 
     def cleanup_moved_files(self):
         """Remove moved files from tracking lists"""
-        # Create list of indices to remove (in reverse order)
-        to_remove = sorted([
-            i for i, (video_path, _) in enumerate(self.file_pairs)
-            if video_path in self.moved_files
+        """Remove moved files and adjust loaded_images keys."""
+        original_indices = {vp: i for i, (vp, _) in enumerate(self.file_pairs)}
+        indices_to_remove = sorted([
+            original_indices[vp] for vp in self.moved_files if vp in original_indices
         ], reverse=True)
-        
-        # Remove from both lists
-        for idx in to_remove:
-            self.photos.pop(idx)
-            self.file_pairs.pop(idx)
+
+        if not indices_to_remove:
+            return self.current_index # No changes needed
+
+        logging.debug(f"Indices to remove: {indices_to_remove}")
+
+        # Remove from file_pairs
+        for idx in indices_to_remove:
+            if 0 <= idx < len(self.file_pairs):
+                logging.debug(f"Removing file pair at index {idx}: {self.file_pairs[idx][0]}")
+                del self.file_pairs[idx]
+            else:
+                 logging.warning(f"Attempted to remove out-of-bounds index {idx}")
+
+
+        # Adjust loaded_images dictionary keys
+        new_loaded_images = {}
+        current_new_idx = 0
+        for old_idx in sorted(self.loaded_images.keys()):
+            # Find the original video path for this old index using the original_indices map reverse lookup (less efficient but needed)
+            original_vp = None
+            for vp, oi in original_indices.items():
+                 if oi == old_idx:
+                      original_vp = vp
+                      break
+
+            if original_vp and original_vp not in self.moved_files:
+                # If the file corresponding to old_idx was NOT moved, keep it with the new index
+                new_loaded_images[current_new_idx] = self.loaded_images[old_idx]
+                current_new_idx += 1
+            else:
+                 logging.debug(f"Discarding loaded image data for moved index {old_idx}")
+
+
+        self.loaded_images = new_loaded_images
+        self.moved_files.clear() # Clear the set for the next batch
+
+        # Calculate the new current_index
+        # It should be the index of the *first file that was NOT removed* at or after the original current_index
+        new_current_index = 0
+        found_new_index = False
+        temp_idx_map = {vp: i for i, (vp, _) in enumerate(self.file_pairs)} # Map of remaining files to their new indices
+        for old_idx in range(self.current_index, len(original_indices)):
+             original_vp = None
+             for vp, oi in original_indices.items():
+                  if oi == old_idx:
+                       original_vp = vp
+                       break
+             if original_vp in temp_idx_map: # Check if this file still exists
+                  new_current_index = temp_idx_map[original_vp]
+                  found_new_index = True
+                  break
+
+        if not found_new_index:
+             # If all files from current onwards were removed, point to the last remaining file or 0
+             new_current_index = max(0, len(self.file_pairs) - 1) if self.file_pairs else 0
+
+
+        logging.debug(f"Cleanup complete. New file_pairs count: {len(self.file_pairs)}. New loaded_images count: {len(self.loaded_images)}. New index: {new_current_index}")
+        return new_current_index
+
 
     def play_video(self, event):
         """Play current video in MPC-HC"""

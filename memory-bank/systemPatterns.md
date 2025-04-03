@@ -6,17 +6,29 @@ The application follows a simple monolithic structure within a single main scrip
 
 ```mermaid
 graph TD
-    A[main()] --> B(FolderSelector Class);
-    B -- User Selects Folder --> C(ImageViewer Class);
-    C -- Displays Image --> D{Tkinter UI};
-    D -- User Input (Keyboard/Mouse) --> C;
-    C -- File Operations --> E[OS File System];
-    C -- Play Video --> F[External Player (MPC-HC)];
-    B -- Drag & Drop --> G[tkinterdnd2];
-    C -- Image Loading/Resizing --> H[Pillow (PIL)];
-    A -- Logging --> I[viewer_debug.log];
-    C -- Logging --> I;
-    B -- Logging --> I;
+    subgraph MainApp [Main Application]
+        A[main()] --> B(FolderSelector Class);
+        B -- User Selects Folder --> C(ImageViewer Class);
+        C -- Manages UI --> D{Tkinter UI};
+        D -- User Input --> C;
+        C -- File Operations --> E[OS File System];
+        C -- Play Video --> F[External Player (MPC-HC)];
+        B -- Drag & Drop --> G[tkinterdnd2];
+        A -- Logging --> I[viewer_debug.log];
+        C -- Logging --> I;
+        B -- Logging --> I;
+    end
+
+    subgraph AsyncLoading [Asynchronous Image Loading]
+        C -- Starts Thread --> T(Background Thread);
+        T -- Loads/Resizes Image --> H[Pillow (PIL)];
+        H -- Puts PIL Image --> Q(queue.Queue);
+        C -- Checks Queue (root.after) --> Q;
+        Q -- Gets PIL Image --> C;
+        C -- Creates PhotoImage & Updates --> D;
+    end
+
+    D -- Window Resize Event --> C;
 ```
 
 ## Key Components & Patterns
@@ -42,9 +54,10 @@ graph TD
     *   Includes cleanup for empty directories (`cleanup_empty_dirs`).
 
 4.  **Image Processing (Pillow):**
-    *   Uses `PIL.Image.open()` to load images.
-    *   Uses `PIL.Image.resize()` with `Image.Resampling.LANCZOS` for scaling images to fit the window.
-    *   Uses `PIL.ImageTk.PhotoImage` to prepare images for display in Tkinter.
+    *   Uses `PIL.Image.open()` to load images **in a background thread**.
+    *   Uses `PIL.Image.thumbnail()` (preserving aspect ratio) with `Image.Resampling.LANCZOS` for scaling images **in a background thread**.
+    *   Stores resized PIL `Image` objects in memory (`loaded_images` dictionary).
+    *   Uses `PIL.ImageTk.PhotoImage` to prepare images for display in Tkinter **on demand in the main thread** when an image needs to be shown or the window is resized.
     *   *Note:* `image_utils.py` contains related functions (`get_supported_images`, `calculate_dimensions`) but they are not currently imported or used by `contact_sheet_manager.py`.
 
 5.  **External Process Interaction:**
@@ -55,5 +68,10 @@ graph TD
     *   Configured to log to both the console (`StreamHandler`) and a file (`viewer_debug.log`).
     *   Logs informational messages, debug details, warnings, and errors.
 
-7.  **Event Handling:**
-    *   Uses Tkinter's `.bind()` method for keyboard events (`<KeyPress-space>`, `<KeyRelease-space>`, 'a', 'f', 'r', 'p', `<Escape>`) and mouse events (`<MouseWheel>`, `<Button-4>`, `<Button-5>`).
+7.  **Concurrency:**
+    *   Uses the `threading` module to run image loading and resizing (`_background_load_images`) in a separate, non-blocking thread.
+    *   Uses a `queue.Queue` (`image_queue`) for thread-safe communication, passing loaded/resized PIL images from the background thread to the main GUI thread.
+    *   Uses `root.after()` in the main thread (`_process_queue`) to periodically check the queue without blocking the event loop.
+
+8.  **Event Handling:**
+    *   Uses Tkinter's `.bind()` method for keyboard events (`<KeyPress-space>`, `<KeyRelease-space>`, 'a', 'f', 'r', 'p', `<Escape>`), mouse events (`<MouseWheel>`, `<Button-4>`, `<Button-5>`), and window configuration events (`<Configure>` for resize handling).
